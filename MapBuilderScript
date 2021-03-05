@@ -1,0 +1,940 @@
+//Made in C# for Unity
+//
+//  Given a set of pre-build rooms, construct a random dungeon.
+//  Construct a NavMesh over the dungeon.
+//  Place the entrance and exit as far away from each other as possible
+//  Place treasure chests in every dead-end
+//  Place enemies throughout the dungeon, a set # per room
+
+
+
+
+
+
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using UnityEngine.AI;
+
+public class MapBuilderScript : MonoBehaviour {
+
+//	public GameManager gameMan;  //so we can tell the manager when the map is finished.
+
+	//tell the Loading Text in the UI
+	//that the level is finished.
+//	public Canvas canvas;
+
+	public GameObject loadingScreen;
+
+
+	//=========PUBLIC VARIABLES===========\\
+
+	[Space]
+	[Header("Map Variables")]
+	public int minRoomCount;  //now set in Game Manager Dungeon Level
+	[Space]
+	public int mapWidth;  //width in rooms
+	public int mapHeight;  //height in rooms
+	[Space]
+	public float roomWidth; //how wide is each room
+	public float roomHeight; //how tall is each room
+	[Space]
+	public int numOfEnemies;  
+
+	//Unity inspector has a GO with rooms as child.
+	//take all those children, add to an LIST, and use LIST in code
+	[Space]
+	[Header("ROOMS LIST")]
+	public GameObject rmsWest;
+	public GameObject rmsEast;
+	public GameObject rmsNorth;
+	public GameObject rmsSouth;
+	public GameObject rmsBlank;
+
+	//private lists of above children for use in code
+	public List<GameObject> rmsWestList;
+	public List<GameObject> rmsEastList;
+	public List<GameObject> rmsNorthList;
+	public List<GameObject> rmsSouthList;
+	public List<GameObject> rmsBlankList;
+
+
+	[Space]
+	public GameObject firstRoom;
+	//if you reroll too many times,
+	//cap the path
+	[Space]
+	public GameObject capWest;
+	public GameObject capEast;
+	public GameObject capNorth;
+	public GameObject capSouth;
+
+	[Space]
+	[Header("Parents")]
+	public GameObject mapParent;
+	public GameObject itemsParent;
+	public GameObject enemiesParent;
+	public GameObject blankRoomsParent;
+
+	[Space]
+	[Header("Spawns")]
+	public GameObject[] enemyGOs;  //spawns enemies
+	public GameObject spawnPoint_items;
+	public GameObject exit;
+
+	//=========PRIVATE VARIABLES===========\\
+
+
+	private LinkedList<GameObject> roomsList;
+	private int rerollCountMax = 3;  //how many rerolls should we allow
+	private double rand;
+	private Vector2 tempPos;
+	private bool[,] mapPlot; //is there already a room here
+	public GameObject[,] roomsGrid;
+	private int roomCount; //how many total rooms are there
+	public List<GameObject> cappedRooms;  //used to place items, enemies, and teleporters
+	public List<GameObject> regularRooms; //list of every room that isn't a cap
+	private GameObject currRoom;
+	private RoomScript currRoomScript;
+	private NavMeshSurface navMeshForDungeon;	//create the navmesh from the FIRSTROOM
+	private GameManager gameMan;
+	private MiniMap minimapScript;  //used to create minimap at start
+
+	public bool mapIsDone;  //called when map is built.  DungeonGO object checks for this.
+
+	void Update() {
+
+	}
+    
+
+	// Use this for initialization
+	void Start () {
+
+		gameMan = FindObjectOfType<GameManager> ();
+		minimapScript = FindObjectOfType<MiniMap> ();
+
+		//set from Game Manager Dungeon Level
+//		minRoomCount = gameMan.dungeonLevel.numOfRooms;
+//		mapWidth = gameMan.dungeonLevel.mapSizeWidth;
+//		mapHeight = gameMan.dungeonLevel.mapSizeHeight;
+//		numOfEnemies = gameMan.dungeonLevel.enemiesPerRoom + 1;  //+1 added to make forloop work
+//		rerollCountMax = gameMan.dungeonLevel.rerollMax;  
+
+		//Initialize private Lists of Rooms GO children for use in code
+		rmsEastList = new List<GameObject> ();
+		rmsWestList = new List<GameObject> ();
+		rmsNorthList = new List<GameObject> ();
+		rmsSouthList = new List<GameObject> ();
+		rmsBlankList = new List<GameObject> ();
+
+		//Take all Children in Rooms List empty GO,
+		//And move them to a private list for use in code
+		foreach (Transform child in rmsEast.transform) {
+			rmsEastList.Add (child.gameObject);
+		}
+		foreach (Transform child in rmsWest.transform) {
+			rmsWestList.Add (child.gameObject);
+		}
+		foreach (Transform child in rmsNorth.transform) {
+			rmsNorthList.Add (child.gameObject);
+		}
+		foreach (Transform child in rmsSouth.transform) {
+			rmsSouthList.Add (child.gameObject);
+		}
+		foreach (Transform child in rmsBlank.transform) {
+			rmsBlankList.Add (child.gameObject);
+		}
+
+		//Build the map when level loads
+		InitializeMap ();
+
+	}
+
+	public void InitializeMap() {
+
+	
+
+		//destroy the original map
+		//so we can rebuild a new one
+		foreach (Transform child in mapParent.transform) {
+			Destroy (child.gameObject);
+		}
+
+		//RESET main list
+		roomsList = new LinkedList<GameObject> ();
+
+		roomsGrid = new GameObject[mapWidth, mapHeight];
+		roomCount = 0;
+
+		//Place the first room
+		tempPos = new Vector2 (0, 0);
+		currRoom = Instantiate (firstRoom, tempPos, Quaternion.identity, mapParent.transform);
+		currRoomScript = currRoom.GetComponent<RoomScript> ();
+
+		currRoomScript.mapPlotPos = tempPos;
+		roomsGrid [0, 0] = currRoom;
+		currRoomScript.roomThatSpawnedMe = currRoom;
+
+		roomsList.AddLast (currRoom);
+		regularRooms.Add (currRoom);
+
+		//create the navmesh from the FIRSTROOM
+		navMeshForDungeon = currRoom.GetComponent<NavMeshSurface> ();
+
+		//RESET rooms lists
+		regularRooms = new List<GameObject> ();
+		cappedRooms = new List<GameObject> ();
+
+		StartCoroutine("BuildMapWithQueue");
+
+	}
+
+
+
+	//=============================   AFTER THE MAP IS BUILT  ==================================\\
+
+
+	void AfterMapIsBuilt() {  //everything we do after all rooms are placed
+
+		//BUILD NAVMESH FROM FIRST ROOM IN DUNGEON
+		navMeshForDungeon.BuildNavMesh ();
+
+        //Place BLANK ROOMS in empty spots in the map
+        for (int x = 0; x < roomsGrid.GetLength(1); x++)
+        {
+            for (int y = 0; y < roomsGrid.GetLength(0); y++)
+            {
+                //only interested in empty spots on the map
+                if (roomsGrid[x, y] != null)
+                    continue;
+
+                int randomBlank = Random.Range(0, rmsBlankList.Count);
+                Vector3 placePOS = new Vector3(x * roomWidth, 0, y * roomHeight);
+                GameObject blankRoom = Instantiate(rmsBlankList[randomBlank], placePOS, Quaternion.identity, blankRoomsParent.transform);
+                roomsGrid[x, y] = blankRoom;
+            }
+        }
+        
+        Vector3 spawnPoint = Vector3.zero;  //spawn of enemy, item, or exit
+		GameObject lastRoom = null;  //which room should the exit be in
+		GameObject lastItem = null;  //the item placed in the furthest room
+
+		//create list of every room that ISN'T a cap
+		foreach (Transform child in mapParent.transform) {
+			
+			if (cappedRooms.Contains (child.gameObject) ||  	//skip if it's a cap 				
+				child.gameObject.tag == "FirstRoom") {          //skip if START room
+				continue;
+			}
+
+			regularRooms.Add (child.gameObject);
+		}
+																							//========place items
+		//items placed after navmesh, so player can interact with them
+		foreach (GameObject room in cappedRooms) {
+
+			GameObject item = null;
+
+			if (room == firstRoom) {//don't place anything in the start room
+				continue;
+			}
+
+			spawnPoint = new Vector3 (room.transform.position.x, 1, room.transform.position.z);  //above ground
+
+			item = Instantiate (spawnPoint_items, spawnPoint, Quaternion.identity, itemsParent.transform);
+
+			if (lastRoom == null ||
+				room.GetComponent<RoomScript> ().distFromSpawn > lastRoom.GetComponent<RoomScript> ().distFromSpawn) {
+				lastRoom = room;  //set this room as the furthest room
+				lastItem = item;
+			}
+		}
+
+		//turn last item in last room into the exit                                         //==========place exit
+		Instantiate (exit, lastItem.transform.position, Quaternion.identity);
+		Destroy (lastItem);
+     
+		//==========place enemies
+		//enemies placed after navmesh, so enemies can use navmesh
+		//number of enemies per room is from 0 to numofenemies
+		//place randomly NEAR spawnpoint of room
+		foreach (GameObject room in regularRooms) {
+
+
+
+			int enemiesToSpawn = Random.Range (0, numOfEnemies);
+			int enemyType = Random.Range (0, enemyGOs.Length);
+
+			for (int e = 0; e < enemiesToSpawn; e++) {
+
+
+				int randZ = Random.Range (-3, 3);
+				int randX = Random.Range (-6, 6);
+				int ypos = 1;
+			
+				//randomly spawn somewhere close to spawn point.
+				spawnPoint = new Vector3 (room.transform.position.x + randX, ypos, room.transform.position.z + randZ); //above ground
+
+
+
+				GameObject thisEnemy = Instantiate (enemyGOs[enemyType], spawnPoint, Quaternion.identity, enemiesParent.transform);
+
+				if (thisEnemy.GetComponent<NavMeshAgent>() != null)
+					thisEnemy.GetComponent<NavMeshAgent> ().enabled = true;
+			
+			} 
+		}
+
+			
+		mapIsDone = true;
+
+		loadingScreen.SetActive(false);
+
+		//Build the Minimap
+		minimapScript.BuildMinimap ();
+
+		//give drops to enemies
+		//and items to treasure chests
+		gameMan.DistributeDropsAndItems ();  
+
+	}
+
+
+
+
+
+
+
+
+
+	//=======================================  BUILD THE MAP  ===========================================\\
+
+
+	IEnumerator BuildMapWithQueue() {
+
+		//main piece has already been placed
+		//main piece has already been tested
+		//new piece is essentially a blank template
+
+		//new pieces have been placed, and are being tested now.  
+		//if they succeed, they become main pieces (get queued)
+
+		while (roomsList.Count > 0) {
+
+			currRoom = null;
+
+			currRoom = (GameObject)roomsList.First.Value;
+
+			currRoomScript = currRoom.GetComponent<RoomScript> ();
+			tempPos = currRoomScript.mapPlotPos;  //get the mapPlotPos from the room itself
+			List<string> roomExits = new List<string>();  //used to ebstore each exit that the room has
+
+			//what are the exits?
+			if (currRoomScript.exitDown == true) {
+				roomExits.Add ("Down");
+			}
+			if (currRoomScript.exitUp == true) {
+				roomExits.Add ("Up");
+			}
+			if (currRoomScript.exitLeft == true) {
+				roomExits.Add ("Left");
+			}
+			if (currRoomScript.exitRight == true) {
+				roomExits.Add ("Right");
+			}
+
+			//the only flag.  This makes it all work.
+			//if any of the tests below fail, then this flag gets flipped.
+			//if EVERY exit succeeds EVERY test, then the piece can stay
+			//otherwise, it gets rerolled and re-queued
+			bool roomSafeToPlace = true;
+
+			//NEW IDEA
+			//stop checking this direction, since there's already a room there;
+			//once you know it's connected, you can't put a room there anyway
+			List<string> dirsToRemove = new List<string> ();
+
+			//run the algorithm test for every exit
+			//where would the next piece theoretically be?
+			//is that place safe?
+			foreach (string roomExitDir in roomExits) {
+				Vector2 nextRoomPlot = Vector2.zero;
+				switch (roomExitDir) {
+				case "Down":
+					nextRoomPlot = new Vector2 (tempPos.x, tempPos.y - 1); 
+
+					//is this exit pointed off the map?
+					if (BoundsTest (nextRoomPlot) == false) {
+						//fail the tests
+						roomSafeToPlace = false;
+						break;
+					}
+
+					//is there already a room next to this exit?
+					if (roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y] != null) {
+
+
+						//does that room have an exit facing this way?
+						//so that they'll connect?
+						if (roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y].GetComponent<RoomScript>().exitUp == false) {  //script of adjacent room
+							roomSafeToPlace = false;
+							break;
+						} else {
+							//stop checking this direction, since there's already a room there;
+							//once you know it's connected, you can't put a room there anyway
+							dirsToRemove.Add(roomExitDir);
+						}
+					}
+
+					break;
+				case "Up":
+					nextRoomPlot = new Vector2 (tempPos.x, tempPos.y + 1); 
+
+					//is this exit pointed off the map?
+					if (BoundsTest (nextRoomPlot) == false) {
+						//fail the tests
+						roomSafeToPlace = false;
+						break;
+					}
+
+					//is there already a room next to this exit?
+					if (roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y] != null) {
+
+						//does that room have an exit facing this way?
+						//so that they'll connect?
+						if (roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y].GetComponent<RoomScript> ().exitDown == false) {  //script of adjacent room
+							roomSafeToPlace = false;
+							break;
+						} else {
+							//stop checking this direction, since there's already a room there;
+							//once you know it's connected, you can't put a room there anyway
+							dirsToRemove.Add(roomExitDir);
+						}
+					}
+
+					break;
+				case "Left":
+					nextRoomPlot = new Vector2 (tempPos.x - 1, tempPos.y); 
+
+					//is this exit pointed off the map?
+					if (BoundsTest (nextRoomPlot) == false) {
+						//fail the tests
+						roomSafeToPlace = false;
+						break;
+					}
+
+					//is there already a room next to this exit?
+					if (roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y] != null) {
+
+						//does that room have an exit facing this way?
+						//so that they'll connect?
+						if (roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y].GetComponent<RoomScript> ().exitRight == false) {  //script of adjacent room
+							roomSafeToPlace = false;
+							break;
+						} else {
+							//stop checking this direction, since there's already a room there;
+							//once you know it's connected, you can't put a room there anyway
+							dirsToRemove.Add(roomExitDir);
+						}
+					} 
+
+					break;
+				case "Right":
+					nextRoomPlot = new Vector2 (tempPos.x + 1, tempPos.y); 
+
+					//is this exit pointed off the map?
+					if (BoundsTest (nextRoomPlot) == false) {
+						//fail the tests
+						roomSafeToPlace = false;
+						break;
+					}
+
+					//is there already a room next to this exit?
+					if (roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y] != null) {
+
+						//does that room have an exit facing this way?
+						//so that they'll connect?
+						if (roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y].GetComponent<RoomScript>().exitLeft == false) {  //script of adjacent room
+							roomSafeToPlace = false;
+							break;
+						} else {
+							//stop checking this direction, since there's already a room there;
+							//once you know it's connected, you can't put a room there anyway
+							dirsToRemove.Add(roomExitDir);
+						}
+					}
+
+					break;
+				default:
+					Debug.Log ("zac something broke again");
+					break;
+				}
+			}
+
+
+			//remove these dirs
+			//stop checking this direction, since there's already a room there;
+			//once you know it's connected, you can't put a room there anyway
+			foreach (string dir in dirsToRemove) {
+				roomExits.Remove (dir);
+			}
+
+			if (roomSafeToPlace == false) {
+				RollARoom();
+				//there's nothing else past this, 
+				//so it essentially ends the method and restarts it later with the new piece
+
+			} else {
+				//piece is safe.  Place new temp pieces at all exits, and queue them.
+				PlaceSafePieces (roomExits);
+			}
+
+			yield return new WaitForSeconds (0.01f);
+
+		}
+
+		//if the map is finished, but there are too few rooms
+		if (roomCount < minRoomCount) {
+			//redo map
+			InitializeMap ();
+		} else {
+			AfterMapIsBuilt ();  //everything we do after rooms are placed
+		}
+
+		yield return null;
+
+	}
+
+	void RollARoom() {
+
+		string capDir;
+
+		//if we've rerolled too many times already
+		if (currRoomScript.roomThatSpawnedMe.GetComponent<RoomScript> ().rerollCounter > rerollCountMax) {
+
+			//Find out which direction you should cap,
+			//based on X and Y position of orig and cap
+			//capDir means WHICH WAY IS THE EXIT
+
+			//if these pieces are on the same X axis
+			if (currRoomScript.roomThatSpawnedMe.transform.position.x == currRoom.transform.position.x) {
+
+
+				//if orig room is above cap
+				if (currRoomScript.roomThatSpawnedMe.transform.position.z > currRoom.transform.position.z) {
+					capDir = "up";
+				} else {
+				
+					//if origin room is below cap
+					capDir = "down";
+				}
+				
+			} else { //if they are on diff X axis
+
+				//if orig room is right of cap
+				if (currRoomScript.roomThatSpawnedMe.transform.position.x > currRoom.transform.position.x) {
+					capDir = "right";
+				} else {
+
+					//orig is to the left
+					capDir = "left";
+				}
+			}
+			CapThePath (capDir);
+			
+		} else {
+
+			roomCount--;
+
+			roomsList.Remove(currRoom);
+			roomsList.AddFirst (currRoomScript.roomThatSpawnedMe);
+
+			currRoomScript.roomThatSpawnedMe.GetComponent<RoomScript> ().rerollCounter++;  //mark that we have rerolled
+
+			roomsGrid [(int)currRoomScript.mapPlotPos.x, (int)currRoomScript.mapPlotPos.y] = null;
+
+			Destroy (currRoom.gameObject);
+
+		}
+	
+	}
+		
+		void CapThePath (string capDir) {
+
+		roomsGrid [(int)currRoomScript.mapPlotPos.x, (int)currRoomScript.mapPlotPos.y] = null;
+
+		GameObject roomCap = null;  //used to grab the correct piece from inspector
+
+		GameObject roomCapInstantiated = null;  //used to store the instantiated object,  to add to list later
+
+		Vector2 nextRoomPlot = Vector2.zero;
+		Vector2 nextPos = Vector2.zero;
+		Vector3 nxPs3D = Vector3.zero;
+
+		//get rid of the final piece
+		Destroy (currRoom.gameObject);
+		roomsGrid[(int)currRoomScript.mapPlotPos.x, (int)currRoomScript.mapPlotPos.y] = null;
+
+		switch (capDir) {
+		case ("down"):
+
+			roomCap = capSouth;  //GO set in inspector
+			nextRoomPlot = new Vector2 (tempPos.x, tempPos.y - 1); 
+			nextPos = new Vector2 ((int)currRoomScript.mapPlotPos.x * roomWidth, (int)currRoomScript.mapPlotPos.y * roomHeight);  //offset by room size
+
+			//NEW CODE FOR 3D PLACEMENT FROM 2D GRID.  VECTORS ARE 2DX, 0, 2DY
+			nxPs3D = new Vector3 (nextPos.x, 0, nextPos.y);
+			roomCapInstantiated = Instantiate (roomCap, nxPs3D, Quaternion.identity, mapParent.transform);
+
+			roomsGrid[(int)currRoomScript.mapPlotPos.x, (int)currRoomScript.mapPlotPos.y] = roomCapInstantiated;
+
+			roomCapInstantiated.GetComponent<RoomScript> ().roomThatSpawnedMe = currRoomScript.roomThatSpawnedMe;
+			roomCount++;
+
+			break;
+		case ("up"):
+
+			roomCap = capNorth;  //GO set in inspector
+			nextRoomPlot = new Vector2 (tempPos.x, tempPos.y + 1); 
+			nextPos = new Vector2 ((int)currRoomScript.mapPlotPos.x * roomWidth, (int)currRoomScript.mapPlotPos.y * roomHeight);  //offset by room size
+
+			//NEW CODE FOR 3D PLACEMENT FROM 2D GRID.  VECTORS ARE 2DX, 0, 2DY
+			nxPs3D = new Vector3 (nextPos.x, 0, nextPos.y);
+			roomCapInstantiated = Instantiate (roomCap, nxPs3D, Quaternion.identity, mapParent.transform);
+
+			roomsGrid[(int)currRoomScript.mapPlotPos.x, (int)currRoomScript.mapPlotPos.y] = roomCapInstantiated;
+
+			roomCapInstantiated.GetComponent<RoomScript> ().roomThatSpawnedMe = currRoomScript.roomThatSpawnedMe;
+			roomCount++;
+
+			break;
+		case ("left"):
+
+			roomCap = capWest;  //GO set in inspector
+			nextRoomPlot = new Vector2 (tempPos.x - 1, tempPos.y); 
+	//		nextPos = new Vector2 (nextRoomPlot.x * roomWidth, nextRoomPlot.y * roomHeight);  //offset by room size
+			nextPos = new Vector2 ((int)currRoomScript.mapPlotPos.x * roomWidth, (int)currRoomScript.mapPlotPos.y * roomHeight);  //offset by room size
+
+			//NEW CODE FOR 3D PLACEMENT FROM 2D GRID.  VECTORS ARE 2DX, 0, 2DY
+			nxPs3D = new Vector3 (nextPos.x, 0, nextPos.y);
+			roomCapInstantiated = Instantiate (roomCap, nxPs3D, Quaternion.identity, mapParent.transform);
+
+			roomsGrid[(int)currRoomScript.mapPlotPos.x, (int)currRoomScript.mapPlotPos.y] = roomCapInstantiated;
+			roomCapInstantiated.GetComponent<RoomScript> ().roomThatSpawnedMe = currRoomScript.roomThatSpawnedMe;
+			roomCount++;
+
+			break;
+		case ("right"):
+
+			roomCap = capEast;  //GO set in inspector
+			nextRoomPlot = new Vector2 (tempPos.x + 1, tempPos.y); 
+			nextPos = new Vector2 ((int)currRoomScript.mapPlotPos.x * roomWidth, (int)currRoomScript.mapPlotPos.y * roomHeight);  //offset by room size
+
+			//NEW CODE FOR 3D PLACEMENT FROM 2D GRID.  VECTORS ARE 2DX, 0, 2DY
+			nxPs3D = new Vector3 (nextPos.x, 0, nextPos.y);
+			roomCapInstantiated = Instantiate (roomCap, nxPs3D, Quaternion.identity, mapParent.transform);
+
+
+			roomsGrid[(int)currRoomScript.mapPlotPos.x, (int)currRoomScript.mapPlotPos.y] = roomCapInstantiated;
+			roomCapInstantiated.GetComponent<RoomScript> ().roomThatSpawnedMe = currRoomScript.roomThatSpawnedMe;
+			roomCount++;
+
+			break;
+		default:
+			break;
+		}
+
+		roomCapInstantiated.GetComponent<RoomScript> ().distFromSpawn = 
+			roomCapInstantiated.GetComponent<RoomScript> ().
+			roomThatSpawnedMe.GetComponent<RoomScript> ().distFromSpawn + 1;
+		cappedRooms.Add (roomCapInstantiated);  //add to the list of room caps, so we can drop items, bosses, and teleporters there
+		roomsList.Remove (currRoom);
+
+	}
+		
+	void PlaceSafePieces(List<string> dirOfExits) {
+
+		foreach (string roomExitDir in dirOfExits) {
+
+			//blank templates.  Rerolled in next step
+			GameObject roomGO = currRoom; 
+			Vector2 nextRoomPlot = Vector2.zero;
+			int roomIndex = 0;
+
+			GameObject nextRoom = null;
+			Vector2 nextPos;
+			Vector3 nxPs3D;
+
+			switch (roomExitDir) {
+			case "Down":
+				roomIndex = Random.Range (0, rmsNorthList.Count);
+				roomGO = rmsNorthList [roomIndex];
+
+				nextRoomPlot = new Vector2 (tempPos.x, tempPos.y - 1); 
+
+				nextPos = new Vector2 (nextRoomPlot.x * roomWidth, nextRoomPlot.y * roomHeight);  //offset by room size
+
+				//NEW CODE FOR 3D PLACEMENT FROM 2D GRID.  VECTORS ARE 2DX, 0, 2DY
+				nxPs3D = new Vector3 (nextPos.x, 0, nextPos.y);
+				nextRoom = Instantiate (roomGO, nxPs3D, Quaternion.identity, mapParent.transform);
+
+				nextRoom.GetComponent<RoomScript> ().mapPlotPos = nextRoomPlot;  //set room script mapPlotPos
+				roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y] = roomGO;
+
+				nextRoom.GetComponent<RoomScript> ().roomThatSpawnedMe = currRoom;
+
+				roomsList.AddFirst (nextRoom);
+
+				roomCount++;		
+				break;
+			case "Up":
+				roomIndex = Random.Range (0, rmsSouthList.Count);
+				roomGO = rmsSouthList [roomIndex];
+				nextRoomPlot = new Vector2 (tempPos.x, tempPos.y + 1); 
+
+				 nextPos = new Vector2 (nextRoomPlot.x * roomWidth, nextRoomPlot.y * roomHeight);  //offset by room size
+
+				//NEW CODE FOR 3D PLACEMENT FROM 2D GRID.  VECTORS ARE 2DX, 0, 2DY
+				nxPs3D = new Vector3 (nextPos.x, 0, nextPos.y);
+				nextRoom = Instantiate (roomGO, nxPs3D, Quaternion.identity, mapParent.transform);
+
+				nextRoom.GetComponent<RoomScript> ().mapPlotPos = nextRoomPlot;  //set room script mapPlotPos
+				roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y] = roomGO;
+
+				nextRoom.GetComponent<RoomScript> ().roomThatSpawnedMe = currRoom;
+
+				roomsList.AddFirst (nextRoom);
+
+				roomCount++;
+
+				break;
+			case "Right":
+				roomIndex = Random.Range (0, rmsWestList.Count);
+				roomGO = rmsWestList [roomIndex];
+
+				nextRoomPlot = new Vector2 (tempPos.x + 1, tempPos.y);
+
+				nextPos = new Vector2 (nextRoomPlot.x * roomWidth, nextRoomPlot.y * roomHeight);  //offset by room size
+
+				//NEW CODE FOR 3D PLACEMENT FROM 2D GRID.  VECTORS ARE 2DX, 0, 2DY
+				nxPs3D = new Vector3 (nextPos.x, 0, nextPos.y);
+				nextRoom = Instantiate (roomGO, nxPs3D, Quaternion.identity, mapParent.transform);
+
+				nextRoom.GetComponent<RoomScript> ().mapPlotPos = nextRoomPlot;  //set room script mapPlotPos
+				roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y] = roomGO;
+
+				nextRoom.GetComponent<RoomScript> ().roomThatSpawnedMe = currRoom;
+
+				roomsList.AddFirst (nextRoom);
+				roomCount++;
+
+				break;
+			case "Left":
+				roomIndex = Random.Range (0, rmsEastList.Count);
+				roomGO = rmsEastList [roomIndex];
+
+				nextRoomPlot = new Vector2 (tempPos.x - 1, tempPos.y); 
+
+				 nextPos = new Vector2 (nextRoomPlot.x * roomWidth, nextRoomPlot.y * roomHeight);  //offset by room size
+
+				//NEW CODE FOR 3D PLACEMENT FROM 2D GRID.  VECTORS ARE 2DX, 0, 2DY
+				nxPs3D = new Vector3 (nextPos.x, 0, nextPos.y);
+				nextRoom = Instantiate (roomGO, nxPs3D, Quaternion.identity, mapParent.transform);
+
+				nextRoom.GetComponent<RoomScript> ().mapPlotPos = nextRoomPlot;  //set room script mapPlotPos
+				roomsGrid [(int)nextRoomPlot.x, (int)nextRoomPlot.y] = roomGO;
+
+				nextRoom.GetComponent<RoomScript> ().roomThatSpawnedMe = currRoom;
+
+				roomsList.AddFirst (nextRoom);
+				roomCount++;
+
+				break;
+			default:
+				Debug.Log ("zac, damn thang done broke dog");
+				break;
+		}
+
+			nextRoom.GetComponent<RoomScript> ().distFromSpawn = currRoom.GetComponent<RoomScript> ().distFromSpawn + 1;
+
+	}
+
+		roomsList.Remove (currRoom);
+}
+
+
+
+
+
+
+	//===========================  TOOLS =============
+
+	//check the bounds
+	bool BoundsTest (Vector2 posToTest) {
+		if (posToTest.x >= 0 && posToTest.y >= 0 && posToTest.x < mapWidth && posToTest.y < mapHeight) {
+			return (true);
+		} else {
+			return (false);
+		}
+	}
+		
+		void OnDrawGizmosSelected() {
+			for (int x = 0; x < mapWidth; x++) {
+				for (int y = 0; y < mapHeight; y++) {
+					if (roomsGrid [x, y] != null) {
+						Gizmos.color = Color.green;
+					Gizmos.DrawCube (new Vector3 ((x * roomWidth), 10, (y * roomHeight)), Vector3.one * 5);
+					//this vector takes in the x/y from the for loops, and turns them into x/z.  vector is x, 0, y
+
+					}
+				}
+			}
+		}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ===============================  OLD OR UNUSED ============================================================\\
+
+
+
+
+
+
+
+
+
+/*
+
+
+	IEnumerator FillRooms() {
+
+		Vector3 pos = new Vector3 ();
+		GameObject room = new GameObject ();
+
+		foreach (Transform child in mapParent.transform) {
+
+			room = child.gameObject;
+
+			RoomScript roomScript = room.GetComponent<RoomScript> ();
+
+			foreach (GameObject fillGO in roomScript.fillsToBuild) {
+
+				switch (fillGO.name) {
+
+				case "fillSpot_1(Clone)":
+					//find a random value
+					//if it's larger than the value
+					//set in the inspector of this script
+					//do nothing
+					rand = Random.value;
+					if (rand > fill_1_chance) {
+						break;
+					} else {
+						pos = fillGO.transform.position;
+						Instantiate (fill_1_piece, pos, Quaternion.identity, room.transform);
+					}
+					break;
+				case "fillSpot_2(Clone)":
+					rand = Random.value;
+					if (rand > fill_2_chance) {
+						break;
+					} else {
+						pos = fillGO.transform.position;
+						Instantiate (fill_2_piece, pos, Quaternion.identity, room.transform);
+					}
+					break;
+				case "fillSpot_3(Clone)":
+					rand = Random.value;
+					if (rand > fill_3_chance) {
+						break;
+					} else {
+						pos = fillGO.transform.position;
+						Instantiate (fill_3_piece, pos, Quaternion.identity, room.transform);
+					}
+					break;
+				case "fillSpot_4(Clone)":
+					rand = Random.value;
+					if (rand > fill_4_chance) {
+						break;
+					} else {
+						pos = fillGO.transform.position;
+						Instantiate (fill_4_piece, pos, Quaternion.identity, room.transform);
+					}
+					break;
+				case "fillSpot_5(Clone)":
+					rand = Random.value;
+					if (rand > fill_5_chance) {
+						break;
+					} else {
+						pos = fillGO.transform.position;
+						Instantiate (fill_5_piece, pos, Quaternion.identity, room.transform);
+					}
+					break;
+				case "fillSpot_6(Clone)":
+					rand = Random.value;
+					if (rand > fill_6_chance) {
+						break;
+					} else {
+						pos = fillGO.transform.position;
+						Instantiate (fill_6_piece, pos, Quaternion.identity, room.transform);
+					}
+					break;
+				case "fillSpot_7(Clone)":
+					rand = Random.value;
+					if (rand > fill_7_chance) {
+						break;
+					} else {
+						pos = fillGO.transform.position;
+						Instantiate (fill_7_piece, pos, Quaternion.identity, room.transform);
+					}
+					break;
+
+				case "fillSpot_8(Clone)":
+					rand = Random.value;
+					if (rand > fill_8_chance) {
+						break;
+					} else {
+						pos = fillGO.transform.position;
+						Instantiate (fill_8_piece, pos, Quaternion.identity, room.transform);
+					}
+					break;
+				}
+
+
+				yield return null;
+					// new WaitForSeconds (0.1f);
+
+			}
+		}
+
+
+
+
+		//let the UI know that the map is finished.
+//		canvas.GetComponent<UI_script>().loadingText.enabled = false;
+
+	//	gameMan.BeginGame ();                                          << ====   Disabled when moved to DarkCloud2
+
+		yield return null;
+	}
+
+
+
+
+*/
+
+
+
